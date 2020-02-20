@@ -4,6 +4,7 @@
         this.entries = [];
         this.dateRanges = [];
         this.sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheet);
+        this.counter = 0;
         return this;
       }
     }
@@ -45,10 +46,19 @@ function mainv2() {
   var config = SWITCH.rangeToDict(configInfo.sheet, configInfo.range);
   setup(config);
   
-  var startForBM = startOfMonth.valueOf() < state.lastRun.valueOf() ? startOfMonth : new Date(Date.UTC(state.lastRun.getUTCFullYear(), state.lastRun.getUTCMonth(), 1,0,0,0));
+  let inScopeSections = ["biweekly", "monthly"];
+  let startDate;
+  if(runQuarterOrNot(rn)) {
+    inScopeSections.push("quarterly");
+    startDate = getStartOfQuarter(state["lastQuarterlyRun"]);
+  }else{
+    startDate = startOfMonth.valueOf() < state.lastRun.valueOf() ? startOfMonth : new Date(Date.UTC(state.lastRun.getUTCFullYear(), state.lastRun.getUTCMonth(), 1,0,0,0));
+  }
   
-  calculateBiweeklyMonthly(startForBM);
-  outputResults(["biweekly", "monthly"]);
+  calculateSections(startDate, inScopeSections);
+  calculateGroups();
+  
+  outputResults(inScopeSections);
   
   tearDown(config);
   
@@ -73,64 +83,93 @@ function tearDown(config){
   sheet.getRange(config["lastRun"]["start"]+':'+config["lastRun"]["end"]).setValue(new Date());
 }
 
-function calculateBiweeklyMonthly(startDate){
+function calculateSections(startDate, sections){
   var filtered = [];
-  state.responses.forEach(function(response){
-    if(response["Timestamp"] != "" && response["Timestamp"] != null){
+  state.responses.forEach((response) => {
+    if(response != null && response["Timestamp"] != "" && response["Timestamp"] != null){
       response["Timestamp"] = new Date(Date.UTC(response["Timestamp"].getUTCFullYear(), response["Timestamp"].getUTCMonth(), response["Timestamp"].getUTCDate(),0,0,0));
-      if(response["Timestamp"].valueOf() >= startDate.valueOf()){
-        filtered.push(response);
-      }
+    if(response["Timestamp"].valueOf() >= startDate.valueOf()){
+      filtered.push(response);
+    }
     }
   });
-  state.responses = filtered;
+state.responses = filtered;
+sections.forEach( section => {
+    state[section].dateRanges =  state[section].dateRanges.filter((range) => range[0].valueOf() >= startDate.valueOf());
+    state[section].dateRanges.forEach( range => {
+       state[section].entries.push(deepClone(state.catsDict));
+    });
+ });
   
-  state.biweekly.dateRanges = state.biweekly.dateRanges.filter(function(range){
-    return range[0].valueOf() >= startDate.valueOf(); 
-  });
-  
-  state.monthly.dateRanges = state.monthly.dateRanges.filter(function(range){
-    return range[0].valueOf() >= startDate.valueOf();
-  });
-  
-  var bCounter = 0;
-  var mCounter= 0 ;
-  
-  state.biweekly.entries.push(deepClone(state.catsDict));
-  state.monthly.entries.push(deepClone(state.catsDict));
-  
-  state.responses.forEach(function(response){
-    bCounter = addIfInRange("biweekly", response, bCounter);
-    mCounter = addIfInRange("monthly", response, mCounter);
+  state.responses.forEach((response) => {
+    sections.forEach( section => state[section].counter = addIfInRange(section, response, state[section].counter));
   });
 }
 
 function addIfInRange(section, response, sectionCounter){
-  if( state[section].dateRanges.length > sectionCounter){
-    var cat = !(response["biweekly"] == null || response["biweekly"] == "") ? response["biweekly"] : response["monthly"];
+  if(state[section].dateRanges.length > sectionCounter){
+    var cat = "biweekly" in response ? response.biweekly : "";
+    cat = cat=="" && "monthly" in response ? response.monthly : cat;
+    if(cat==""){
+      logError("Can't find category in response", response);
+      return sectionCounter;
+    }
     if( state[section].dateRanges[sectionCounter][0].valueOf() <= response["Timestamp"].valueOf() && state[section].dateRanges[sectionCounter][1].valueOf() >= response["Timestamp"].valueOf()){
-      state[section].entries[sectionCounter][cat]["total"] += response["amount"];
-    }else{
+      if(!(cat in state[section].entries[sectionCounter])){
+        logError("Category doesn't exist", response);
+      }else{
+        state[section].entries[sectionCounter][cat]["total"] += response["amount"];
+      }
+    }else if(response["Timestamp"].valueOf() > state[section].dateRanges[sectionCounter][1].valueOf()){
       sectionCounter+=1;
-      state[section].entries.push(deepClone(state.catsDict));
-      state[section].entries[sectionCounter][cat]["total"] += response["amount"];
+      if( state[section].dateRanges.length > sectionCounter){
+        state[section].entries[sectionCounter][cat]["total"] += response["amount"];
+      }
     }
   }
   return sectionCounter;
 }
 
 function outputResults(sections){
-  sections.forEach(function(section){
+  outputColumnNames(sections);
+  sections.forEach((section) => {
     var colCount;
     for(var i = 0; i < state[section].dateRanges.length; i++){
       colCount=0;
-      state.catsOrder.forEach(function(cat){
+      state.catsOrder.forEach((cat) => {
         if(state[section].entries[i][cat]["is"+section]){
           setValueToCell(state[section]["sheet"], colCount, state[section].dateRanges[i][2], state[section].entries[i][cat]["total"]);
           colCount += 1;
         }
       });
     }
+  });
+}
+
+function outputColumnNames(sections){
+  sections.forEach((section) => {
+     var colCount = 0;
+     state.catsOrder.forEach((cat) => {
+    if(state[section].entries[0][cat]["is"+section]){
+      setValueToCell(state[section]["sheet"], colCount, 1, cat);
+    colCount += 1;
+  }
+  })
+ });
+}
+
+function calculateGroups(){
+  Object.keys(state).filter( key => key.slice(-2) == "ly")
+  .map((section) => {
+       state[section].entries
+  .map(entry => {
+       Object.keys(entry)
+  .forEach((cat) => {
+       if(!(entry[cat]["group"] == null || entry[cat]["group"] == "")){
+          entry[entry[cat]["group"]]["total"] += entry[cat]["total"];
+       }
+  })
+  })         
   });
 }
 
@@ -147,7 +186,7 @@ function rangeToDict(sheetName, range) {
   var columns = matrix.shift();
   var dict_data = {};
   
-  matrix.forEach(function(row){ 
+  matrix.forEach((row) => { 
     for(var i in columns){
       if ( i == 0 ){
         dict_data[row[0]] = {};
@@ -164,7 +203,7 @@ function rangeToArrayofDicts(sheetName, range) {
   var columns = matrix.shift();
   var array_data = [];
   
-  matrix.forEach(function(row){
+  matrix.forEach((row) => {
     var dict_data = {};
     for(var i in columns){
       dict_data[columns[i]] = row[i];
@@ -192,22 +231,33 @@ function rangeToValue(sheetName, range) {
   return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName).getRange(range).getValue();
 }
 
+function runQuarterOrNot(rn){
+  let startOfThisQuarter = getStartOfQuarter(rn);
+  let startOfLastRunQuarter = getStartOfQuarter(state["lastQuarterlyRun"]);
+  return startOfThisQuarter.valueOf() != startOfLastRunQuarter.valueOf();
+}
+
 function getStartOfQuarter(date){
   var month = date.getUTCMonth() + 1;
   switch(Math.ceil(month / 3)){
     case 1:
-      return new Date(date.getYear(), 1,1);
+      return new Date(Date.UTC(date.getUTCFullYear(), 1,1));
      break;
     case 2:
-      return new Date(date.getYear(),3,1);
+      return new Date(Date.UTC(date.getUTCFullYear(),3,1));
     break;
     case 3:
-      return new Date(date.getYear(),6,1);
+      return new Date(Date.UTC(date.getUTCFullYear(),6,1));
     break;
     case 4:
-      return new Date(date.getYear(),9,1);
+      return new Date(Date.UTC(date.getUTCFullYear(),9,1));
     break;
     default:
-      return new Date(date.getYear(), 1,1);
+      return new Date(Date.UTC(date.getUTCFullYear(), 1,1));
   }
+}
+
+function logError(message, obj){
+  var body = message +"\n" + JSON.stringify(obj); 
+  MailApp.sendEmail("alexctomkins@gmail.com", "Money Scripts Error", body)
 }
